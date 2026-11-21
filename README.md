@@ -1,6 +1,6 @@
 # 🎨 AI Image Generation Skill
 
-> Generate images on-the-fly from your coding workflow — powered by OpenAI or Google Gemini.
+> Generate images on-the-fly from your coding workflow — powered by OpenAI, Google Gemini, or OpenRouter.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![VS Code](https://img.shields.io/badge/VS%20Code-Agent%20Plugin-007ACC?logo=visualstudiocode)](https://code.visualstudio.com/docs/copilot/customization/agent-plugins)
@@ -11,7 +11,7 @@ An agent plugin that gives your AI coding assistant the ability to generate imag
 
 ## ✨ Features
 
-- **Two providers:** OpenAI (`gpt-image-2`, `gpt-image-2.5`/`2.6`) and Google Gemini (Nano Banana 2.1, Nano Banana Pro)
+- **Three providers:** OpenAI (`gpt-image-2`, `gpt-image-2.5`/`2.6`), Google Gemini (Nano Banana 2.1, Nano Banana Pro), and OpenRouter (multi-model, default `bytedance-seed/seedream-5-0-flash`)
 - **Zero config up front** — the skill onboards you the first time you use it
 - **Cross-tool compatible** — works in VS Code, Copilot CLI, and Claude Code
 - **Agent plugin format** — discoverable, installable, and manageable from the Extensions view

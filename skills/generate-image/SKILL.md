@@ -3,13 +3,14 @@ name: generate-image
 description: >-
   Generate images using AI. Use when asked to generate, create, or make images, textures,
   icons, sprites, artwork, visual assets, or mockups. Supports OpenAI (gpt-image-2 and
-  gpt-image-2.5/2.6) and Google Gemini (Nano Banana 2.1 and Nano Banana Pro). Requires an
-  API key for the chosen provider.
+  gpt-image-2.5/2.6), Google Gemini (Nano Banana 2.1 and Nano Banana Pro), and OpenRouter
+  (multi-provider, default bytedance-seed/seedream-5-0-flash). Requires an API key for the
+  chosen provider.
 argument-hint: "[description of the image to generate]"
 license: MIT
 metadata:
-  version: "3.0.0"
-  providers: "openai, gemini"
+  version: "3.1.0"
+  providers: "openai, gemini, openrouter"
 ---
 
 # Generate Image
@@ -18,9 +19,9 @@ You are an image generation assistant. When invoked, follow the workflow below.
 
 ## Workflow
 
-1. **Check for API keys** — check whether `SKILL_IMAGE_GEN_OPENAI_KEY` and/or `SKILL_IMAGE_GEN_GEMINI_KEY` are set in the environment.
+1. **Check for API keys** — check whether `SKILL_IMAGE_GEN_OPENAI_KEY`, `SKILL_IMAGE_GEN_GEMINI_KEY`, and/or `SKILL_IMAGE_GEN_OPENROUTER_KEY` are set in the environment.
 2. **If one key is set** — use that provider. No need to ask.
-3. **If both are set** — pick based on context: OpenAI for maximum polish and text rendering (`gpt-image-2.5`/`2.6` with `quality: "max"` when it matters), Gemini Nano Banana 2.1 for speed, cost efficiency, and free-tier iteration. Or ask if the user has a preference.
+3. **If multiple keys are set** — pick based on context: OpenAI for maximum polish and text rendering (`gpt-image-2.5`/`2.6` with `quality: "max"` when it matters), Gemini Nano Banana 2.1 for speed, cost efficiency, and free-tier iteration, OpenRouter for one-billing-account access to many models (default `bytedance-seed/seedream-5-0-flash`). Or ask if the user has a preference.
 4. **If no keys are set** — run the Onboarding section.
 5. **Generate the image** using the appropriate API reference.
 6. **Tell the user** where the image was saved.
@@ -32,10 +33,12 @@ Only run this if no keys are set. Guide the user conversationally.
 1. Ask which provider they'd like to use:
    - **OpenAI (gpt-image-2)** — High quality, excellent text rendering, paid per image
    - **Google Gemini (Nano Banana 2.1)** — Fast, free tier available, great for iteration
+   - **OpenRouter** — One account and key for many image models across providers (default: `bytedance-seed/seedream-5-0-flash`)
 2. Direct them to get an API key:
    - OpenAI → https://platform.openai.com/api-keys
    - Gemini → https://aistudio.google.com/apikey
-3. Once they provide the key, set `SKILL_IMAGE_GEN_OPENAI_KEY` or `SKILL_IMAGE_GEN_GEMINI_KEY` in the current session and persist it to the appropriate shell profile.
+   - OpenRouter → https://openrouter.ai/settings/keys
+3. Once they provide the key, set `SKILL_IMAGE_GEN_OPENAI_KEY`, `SKILL_IMAGE_GEN_GEMINI_KEY`, or `SKILL_IMAGE_GEN_OPENROUTER_KEY` in the current session and persist it to the appropriate shell profile.
 4. Proceed to generate the image they originally asked for.
 
 ## API Reference: OpenAI
@@ -116,16 +119,65 @@ To edit or composite from existing images, append `inlineData` parts (base64-enc
 
 **Error cases:** `error` key (API error), `promptFeedback.blockReason` (safety block), `finishReason: "SAFETY"` (filtered).
 
+## API Reference: OpenRouter
+
+**Method:** `POST`
+**URL:** `https://openrouter.ai/api/v1/images`
+
+**Headers:**
+- `Authorization: Bearer <SKILL_IMAGE_GEN_OPENROUTER_KEY>`
+- `Content-Type: application/json`
+
+**Body (JSON):**
+```json
+{
+  "model": "bytedance-seed/seedream-5-0-flash",
+  "prompt": "<user prompt>",
+  "n": 1,
+  "resolution": "2K",
+  "aspect_ratio": "16:9"
+}
+```
+
+Omit `resolution`/`aspect_ratio` unless the user asks — defaults then apply per provider.
+
+| Field | Default | Options / constraints |
+|---|---|---|
+| model | `bytedance-seed/seedream-5-0-flash` | Any image model slug from `GET https://openrouter.ai/api/v1/images/models` (e.g. `bytedance-seed/seedream-5-0-flash` — fast, cheap default; `bytedance-seed/seedream-5-5` / `bytedance-seed/seedream-5-0-pro` — higher quality; `openai/gpt-image-2`; `google/gemini-2.5-flash-image`; `black-forest-labs/flux.2-pro`). Also discoverable at https://openrouter.ai/models?output_modalities=image |
+| prompt | — | Text description of the desired image |
+| resolution | (provider default) | Tiers: `512`, `768`, `1K`, `1.5K`, `2K`, `4K` |
+| aspect_ratio | (provider default) | `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `4:5`, `5:4`, plus extended ratios like `1:2`, `2:1`, `1:4`, `4:1`, `1:8`, `8:1`, `9:21`, `21:9`; `auto` lets the provider choose. Providers clamp to their supported subset |
+| size | (unset) | Shorthand: a tier (`"2K"`) or explicit pixels (`"2048x2048"`) — pixel sizes are provider-dependent; xAI and Sourceful V2/V2.5 reject them with a 400 |
+| quality | (unset) | `auto`, `low`, `medium`, `high` — providers without a quality knob ignore this |
+| output_format | (provider default) | `png`, `jpeg`, `webp`, `svg` (vector models only), `gif` (animation-capable models only) |
+| background | (unset) | `auto`, `transparent`, `opaque` — `transparent` requires an alpha-capable format (`png`/`webp`) |
+| output_compression | (unset) | 0–100, for `webp`/`jpeg` only |
+| n | 1 | 1–10 images; single-image providers reject `n > 1` |
+| seed | (unset) | Integer for deterministic generation, where supported |
+| response_format | `b64_json` | `b64_json` (inline) or `url` — signed download URLs expire after 24 hours |
+| stream | `false` | SSE partial images, only for models with `supports_streaming: true` |
+| input_references | (unset) | Array of reference images for image-to-image: `{"type": "image_url", "image_url": {"url": "<https URL or base64 data URL>"}}` |
+| frame_count / frame_duration_ms | (unset) | GIF animation: frames (2–64) and per-frame display time (20–2000 ms); animation-capable models only |
+| provider | (unset) | Routing object: `only`, `order`, `ignore`, `sort` (`price`/`throughput`/`latency`), `allow_fallbacks`, `zdr`, `data_collection`; plus `options` keyed by provider slug for passthrough parameters |
+
+**Per-model capability check:** each model/endpoint accepts a different parameter subset. Before using an advanced parameter, check `GET https://openrouter.ai/api/v1/images/models/<model>/endpoints` — its `supported_parameters` lists exactly what that endpoint accepts, and `allowed_passthrough_parameters` lists keys accepted under `provider.options`.
+
+**Response:** `data[0].b64_json` contains the base64-encoded image; `data[0].media_type` (e.g. `image/png`) identifies the format — use it to pick the file extension. `usage.cost` reports the USD cost of the generation. With `response_format: "url"`, `data[0].url` is a signed download link (expires after 24 hours, per `expires_at`).
+
+**Error cases:** non-2xx status with a JSON `error` object (failed generations return `502` and are never billed). Billing is all-or-nothing: a generation is either completed and billed in full, or failed and billed nothing.
+
 ## Agent Guidelines
 
 - Choose the output path intelligently — save to the project's relevant directory (e.g., `assets/`, `images/`, or the current directory).
 - For game textures, enrich prompts with "seamless", "tileable", "game asset".
 - For batch generation, make multiple API calls in parallel.
-- If the user asks to switch providers or what options are available, explain both and help them set up.
+- If the user asks to switch providers or what options are available, explain them all and help them set up.
 - Always create the output directory before saving.
 - Ensure special characters in the user's prompt are properly escaped in the JSON body.
-- If the user asks for a specific aspect ratio, map it to `size` (OpenAI, including custom `WIDTHxHEIGHT` dimensions) or `imageConfig.aspectRatio` (Gemini). For higher resolution, use `quality: "high"` (or `xhigh`/`max` on gpt-image-2.5) on OpenAI, or `imageConfig.imageSize: "2K"`/`"4K"` on Gemini.
-- For transparent backgrounds (icons, sprites) on OpenAI, set `background: "transparent"` with `output_format: "png"` or `"webp"`.
-- Use `output_format: "jpeg"` on OpenAI when latency matters more than format fidelity.
+- If the user asks for a specific aspect ratio, map it to `size` (OpenAI, including custom `WIDTHxHEIGHT` dimensions), `imageConfig.aspectRatio` (Gemini), or `aspect_ratio` (OpenRouter). For higher resolution, use `quality: "high"` (or `xhigh`/`max` on gpt-image-2.5) on OpenAI, `imageConfig.imageSize: "2K"`/`"4K"` on Gemini, or `resolution: "2K"`/`"4K"` on OpenRouter.
+- If the user names an OpenRouter model that isn't in the table (e.g. `black-forest-labs/flux.2-pro`), look it up via `GET https://openrouter.ai/api/v1/images/models` and check its `supported_parameters` before sending advanced fields.
+- On OpenRouter, report the generation cost from `usage.cost` after saving the image, and prefer `provider.sort: "price"` when the user is cost-sensitive.
+- For transparent backgrounds (icons, sprites) on OpenAI, set `background: "transparent"` with `output_format: "png"` or `"webp"`; on OpenRouter the same `background`/`output_format` fields work on models that support them (e.g. seedream).
+- Use `output_format: "jpeg"` when latency matters more than format fidelity.
 - If the user cares about image provenance, note that Gemini outputs carry an invisible SynthID watermark.
 - If the user asks for image editing, inpainting, animated GIFs, or streaming partial results, point them at the OpenAI Responses API (`POST /v1/responses`) — see its docs for `input_image_mask`, `frame_count`, `frame_duration_ms`, and `partial_images`.
