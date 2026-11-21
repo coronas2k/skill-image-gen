@@ -4,7 +4,7 @@
   "version": "1.2.0",
   "author": {
     "name": "coronas2k",
-    "url": "https://github.com/coronas2k/openai-image-gen"
+    "url": "https://github.com/coronas2k/skill-image-gen"
   },
   "credits": "Based on skill-image-gen by adamd9 (https://github.com/adamd9/skill-image-gen), MIT licensed.",
   "skills": "skills/"

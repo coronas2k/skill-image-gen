@@ -29,7 +29,7 @@ Chat: Install Plugin From Source
 Enter this repo URL:
 
 ```
-https://github.com/coronas2k/openai-image-gen
+https://github.com/coronas2k/skill-image-gen
 ```
 
 The plugin and its skills will appear in your Extensions sidebar under **Agent Plugins**.
@@ -37,7 +37,7 @@ The plugin and its skills will appear in your Extensions sidebar under **Agent P
 ### Copilot CLI / Claude Code
 
 ```bash
-git clone https://github.com/coronas2k/openai-image-gen.git
+git clone https://github.com/coronas2k/skill-image-gen.git
 cd skill-image-gen
 ./install.sh
 ```
