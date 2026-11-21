@@ -162,6 +162,24 @@ Omit `resolution`/`aspect_ratio` unless the user asks — defaults then apply pe
 
 **Per-model capability check:** each model/endpoint accepts a different parameter subset. Before using an advanced parameter, check `GET https://openrouter.ai/api/v1/images/models/<model>/endpoints` — its `supported_parameters` lists exactly what that endpoint accepts, and `allowed_passthrough_parameters` lists keys accepted under `provider.options`.
 
+### Default model: `bytedance-seed/seedream-5-0-flash`
+
+Supported parameters, from the model's `/endpoints` listing (single endpoint, provider `seed`; checked 2026-11-22). Send only these to the default model:
+
+| Field | Accepted values |
+|---|---|
+| resolution | `1K`, `1.5K`, `2K` — no `512`, `768` or `4K`; use `seedream-5-5` / `seedream-5-0-pro` for higher resolution |
+| aspect_ratio | `1:1`, `1:2`, `2:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `9:21`, `21:9`, `auto` |
+| output_format | `png`, `jpeg` — no `webp`, `svg` or `gif` |
+| background | `auto`, `transparent`, `opaque` — pair `transparent` with `output_format: "png"` |
+| n | `1` only — for several images, make parallel calls |
+| input_references | 0–14 reference images |
+| seed | supported |
+
+Not supported on this model: `quality`, `output_compression`, `stream`, `frame_count`/`frame_duration_ms`, and `provider.options` passthrough (none allowed).
+
+**Pricing:** $0.018 per output image; input reference images are free.
+
 **Response:** `data[0].b64_json` contains the base64-encoded image; `data[0].media_type` (e.g. `image/png`) identifies the format — use it to pick the file extension. `usage.cost` reports the USD cost of the generation. With `response_format: "url"`, `data[0].url` is a signed download link (expires after 24 hours, per `expires_at`).
 
 **Error cases:** non-2xx status with a JSON `error` object (failed generations return `502` and are never billed). Billing is all-or-nothing: a generation is either completed and billed in full, or failed and billed nothing.
