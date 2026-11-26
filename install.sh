@@ -60,23 +60,26 @@ check_prerequisites() {
   local missing=0
   local tool
 
-  for tool in curl python3 base64; do
+  for tool in python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-      warn "$tool is not installed or not on PATH. The skill may not work until it is installed."
+      warn "$tool is not installed or not on PATH. The skill needs Python 3.8 or newer to run its generation script."
       missing=1
     fi
   done
 
   if [ "$missing" -eq 0 ]; then
-    say "Prerequisite check: curl, python3, and base64 found."
+    say "Prerequisite check: python3 found."
   fi
 }
 
 check_sources() {
-  if [ ! -f "$SCRIPT_DIR/skills/generate-image/SKILL.md" ]; then
-    printf 'Error: Missing required source file: %s/skills/generate-image/SKILL.md\n' "$SCRIPT_DIR" >&2
-    exit 1
-  fi
+  local f
+  for f in SKILL.md scripts/imagegen.py; do
+    if [ ! -f "$SCRIPT_DIR/skills/generate-image/$f" ]; then
+      printf 'Error: Missing required source file: %s/skills/generate-image/%s\n' "$SCRIPT_DIR" "$f" >&2
+      exit 1
+    fi
+  done
 }
 
 install_target() {
@@ -94,11 +97,14 @@ install_target() {
 
   run_cmd mkdir -p "$target"
   run_cmd rm -f "$target/SKILL.md"
+  run_cmd rm -rf "$target/scripts"
 
   if [ "$LINK_MODE" = true ]; then
     run_cmd ln -s "$SCRIPT_DIR/skills/generate-image/SKILL.md" "$target/SKILL.md"
+    run_cmd ln -s "$SCRIPT_DIR/skills/generate-image/scripts" "$target/scripts"
   else
     run_cmd cp "$SCRIPT_DIR/skills/generate-image/SKILL.md" "$target/SKILL.md"
+    run_cmd cp -R "$SCRIPT_DIR/skills/generate-image/scripts" "$target/scripts"
   fi
   say "$label: $status_word at $target"
 }
