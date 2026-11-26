@@ -4,7 +4,7 @@ description: >-
   Generate images using AI. Use when asked to generate, create, or make images, textures,
   icons, sprites, artwork, visual assets, or mockups. Supports OpenAI (gpt-image-2 and
   gpt-image-2.5/2.6), Google Gemini (Nano Banana 2.1 and Nano Banana Pro), and OpenRouter
-  (multi-provider, default bytedance-seed/seedream-5-0-flash). Requires an API key for the
+  (multi-provider, default black-forest-labs/flux-3-image-klein at 4K). Requires an API key for the
   chosen provider.
 argument-hint: "[description of the image to generate]"
 license: MIT
@@ -21,7 +21,7 @@ You are an image generation assistant. When invoked, follow the workflow below.
 
 1. **Check for API keys** — check whether `SKILL_IMAGE_GEN_OPENAI_KEY`, `SKILL_IMAGE_GEN_GEMINI_KEY`, and/or `SKILL_IMAGE_GEN_OPENROUTER_KEY` are set in the environment.
 2. **If one key is set** — use that provider. No need to ask.
-3. **If multiple keys are set** — pick based on context: OpenAI for maximum polish and text rendering (`gpt-image-2.5`/`2.6` with `quality: "max"` when it matters), Gemini Nano Banana 2.1 for speed, cost efficiency, and free-tier iteration, OpenRouter for one-billing-account access to many models (default `bytedance-seed/seedream-5-0-flash`). Or ask if the user has a preference.
+3. **If multiple keys are set** — pick based on context: OpenAI for maximum polish and text rendering (`gpt-image-2.5`/`2.6` with `quality: "max"` when it matters), Gemini Nano Banana 2.1 for speed, cost efficiency, and free-tier iteration, OpenRouter for one-billing-account access to many models (default `black-forest-labs/flux-3-image-klein` at 4K). Or ask if the user has a preference.
 4. **If no keys are set** — run the Onboarding section.
 5. **Write the prompt** — follow the Writing the Prompt section.
 6. **Generate the image** using the appropriate API reference.
@@ -35,7 +35,7 @@ Only run this if no keys are set. Guide the user conversationally.
 1. Ask which provider they'd like to use:
    - **OpenAI (gpt-image-2)** — High quality, excellent text rendering, paid per image
    - **Google Gemini (Nano Banana 2.1)** — Fast, free tier available, great for iteration
-   - **OpenRouter** — One account and key for many image models across providers (default: `bytedance-seed/seedream-5-0-flash`)
+   - **OpenRouter** — One account and key for many image models across providers (default: `black-forest-labs/flux-3-image-klein` at 4K)
 2. Direct them to get an API key:
    - OpenAI → https://platform.openai.com/api-keys
    - Gemini → https://aistudio.google.com/apikey
@@ -62,7 +62,7 @@ When the image must contain words (posters, logos, labels, signs, UI, diagrams):
 - Say where the text goes, its color and its size: `large white letters centered on a black band across the bottom third`.
 - Keep each piece of text short. One to four words render reliably; sentences and paragraphs come out garbled.
 - End the prompt with `No other text.` Without it, models tend to invent slogans, taglines and labels the user never asked for. Short exclusions like this one (or `no watermark`, `no logos`) at the end of a prompt are followed; elsewhere, describe what should be there rather than what shouldn't.
-- Use the highest resolution or quality the chosen model supports (`2K` on `seedream-5-0-flash`, `quality: "high"` or above on OpenAI). When several keys are set, prefer OpenAI for text-heavy images.
+- Use the highest resolution or quality the chosen model supports (`4K` on `flux-3-image-klein`, `quality: "high"` or above on OpenAI). When several keys are set, prefer OpenAI for text-heavy images.
 - If a word comes out misspelled, regenerate with the word spelled out: `the brand name "Ployo" (spelled P-L-O-Y-O)`.
 
 ## Saving
@@ -168,19 +168,19 @@ To edit or composite from existing images, append `inlineData` parts (base64-enc
 **Body (JSON):**
 ```json
 {
-  "model": "bytedance-seed/seedream-5-0-flash",
+  "model": "black-forest-labs/flux-3-image-klein",
   "prompt": "<user prompt>",
   "n": 1,
-  "resolution": "2K",
+  "resolution": "4K",
   "aspect_ratio": "16:9"
 }
 ```
 
-Omit `resolution`/`aspect_ratio` unless the user asks — defaults then apply per provider.
+With the default model, always send `resolution: "4K"` unless the user asks for a smaller size or a quick draft. Omit `aspect_ratio` unless the user asks for a shape or the use makes one obvious (16:9 for wallpapers and slides, 9:16 for phone screens). For other models, omit `resolution`/`aspect_ratio` unless the user asks — defaults then apply per provider.
 
 | Field | Default | Options / constraints |
 |---|---|---|
-| model | `bytedance-seed/seedream-5-0-flash` | Any image model slug from `GET https://openrouter.ai/api/v1/images/models` (e.g. `bytedance-seed/seedream-5-0-flash` — fast, cheap default; `bytedance-seed/seedream-5-5` / `bytedance-seed/seedream-5-0-pro` — higher quality; `openai/gpt-image-2`; `google/gemini-2.5-flash-image`; `black-forest-labs/flux.2-pro`). Also discoverable at https://openrouter.ai/models?output_modalities=image |
+| model | `black-forest-labs/flux-3-image-klein` | Any image model slug from `GET https://openrouter.ai/api/v1/images/models` (e.g. `black-forest-labs/flux-3-image-klein` — default, sharp detail at 4K; `bytedance-seed/seedream-5-0-flash` — fast, cheap, transparent backgrounds, 2K max; `bytedance-seed/seedream-5-5` / `bytedance-seed/seedream-5-0-pro` — higher quality; `openai/gpt-image-2`; `google/gemini-2.5-flash-image`; `black-forest-labs/flux.2-pro`). Also discoverable at https://openrouter.ai/models?output_modalities=image |
 | prompt | — | Text description of the desired image |
 | resolution | (provider default) | Tiers: `512`, `768`, `1K`, `1.5K`, `2K`, `4K` |
 | aspect_ratio | (provider default) | `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `4:5`, `5:4`, plus extended ratios like `1:2`, `2:1`, `1:4`, `4:1`, `1:8`, `8:1`, `9:21`, `21:9`; `auto` lets the provider choose. Providers clamp to their supported subset |
@@ -199,9 +199,29 @@ Omit `resolution`/`aspect_ratio` unless the user asks — defaults then apply pe
 
 **Per-model capability check:** each model/endpoint accepts a different parameter subset. Before using an advanced parameter, check `GET https://openrouter.ai/api/v1/images/models/<model>/endpoints` — its `supported_parameters` lists exactly what that endpoint accepts, and `allowed_passthrough_parameters` lists keys accepted under `provider.options`.
 
-### Default model: `bytedance-seed/seedream-5-0-flash`
+### Default model: `black-forest-labs/flux-3-image-klein`
 
-Supported parameters, from the model's `/endpoints` listing (single endpoint, provider `seed`; checked 2026-11-22). Send only these to the default model:
+Supported parameters, from the model's `/endpoints` listing (single endpoint, provider `black-forest-labs`; checked 2026-11-26). Send only these to the default model:
+
+| Field | Accepted values |
+|---|---|
+| resolution | `768`, `1K`, `1.5K`, `2K`, `4K` — use `4K` by default; a 16:9 image at 4K comes out 5456×3072 |
+| aspect_ratio | `21:9`, `2:1`, `16:9`, `3:2`, `7:5`, `4:3`, `5:4`, `1:1`, `4:5`, `3:4`, `5:7`, `2:3`, `9:16`, `1:2`, `9:21`, `auto` |
+| output_format | `jpeg`, `png` |
+| n | `1` only — for several images, make parallel calls |
+| input_references | 0–10 reference images |
+| seed | supported |
+| provider.options | passthrough keys `safety_tolerance`, `steps` |
+
+Not supported on this model: `background` (no transparent output — use `seedream-5-0-flash` for icons and sprites), `quality`, `output_compression`, `stream`, `frame_count`/`frame_duration_ms`.
+
+**Pricing:** per output image by resolution — 0.008 USD at `768`, 0.009 at `1K`, 0.011 at `1.5K`, 0.014 at `2K`, 0.036 at `4K`. Use `2K` or lower for drafts the user wants to iterate on cheaply, and `4K` for the final image.
+
+**Notes:** a 4K image takes about 80 seconds and is about 8–9 MB as JPEG; allow a long request timeout. The model tends to use a strong wide-angle look and to take scene words literally (for example, "from a rooftop" draws the rooftop edge in frame); say what should not be in frame when that matters.
+
+### Alternative model: `bytedance-seed/seedream-5-0-flash`
+
+Use when the user wants a transparent background or the cheapest 2K image. Supported parameters, from the model's `/endpoints` listing (single endpoint, provider `seed`; checked 2026-11-22). Send only these to this model:
 
 | Field | Accepted values |
 |---|---|
@@ -230,7 +250,7 @@ Not supported on this model: `quality`, `output_compression`, `stream`, `frame_c
 - If the user asks for a specific aspect ratio, map it to `size` (OpenAI, including custom `WIDTHxHEIGHT` dimensions), `imageConfig.aspectRatio` (Gemini), or `aspect_ratio` (OpenRouter). For higher resolution, use `quality: "high"` (or `xhigh`/`max` on gpt-image-2.5) on OpenAI, `imageConfig.imageSize: "2K"`/`"4K"` on Gemini, or `resolution: "2K"`/`"4K"` on OpenRouter.
 - If the user names an OpenRouter model that isn't in the table (e.g. `black-forest-labs/flux.2-pro`), look it up via `GET https://openrouter.ai/api/v1/images/models` and check its `supported_parameters` before sending advanced fields.
 - On OpenRouter, report the generation cost from `usage.cost` after saving the image, and prefer `provider.sort: "price"` when the user is cost-sensitive.
-- For transparent backgrounds (icons, sprites) on OpenAI, set `background: "transparent"` with `output_format: "png"` or `"webp"`; on OpenRouter the same `background`/`output_format` fields work on models that support them (e.g. seedream).
+- For transparent backgrounds (icons, sprites) on OpenAI, set `background: "transparent"` with `output_format: "png"` or `"webp"`; on OpenRouter the same `background`/`output_format` fields work on models that support them (e.g. `seedream-5-0-flash`, not the default Flux Klein — switch to seedream for transparent output).
 - Use `output_format: "jpeg"` when latency matters more than format fidelity.
 - If the user cares about image provenance, note that Gemini outputs carry an invisible SynthID watermark.
 - If the user asks for image editing, inpainting, animated GIFs, or streaming partial results, point them at the OpenAI Responses API (`POST /v1/responses`) — see its docs for `input_image_mask`, `frame_count`, `frame_duration_ms`, and `partial_images`.
