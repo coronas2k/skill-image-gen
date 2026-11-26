@@ -61,6 +61,7 @@ When the image must contain words (posters, logos, labels, signs, UI, diagrams):
 - Describe the type style instead of naming a font: `bold condensed sans-serif`, `flowing brush script`, `slab serif`.
 - Say where the text goes, its color and its size: `large white letters centered on a black band across the bottom third`.
 - Keep each piece of text short. One to four words render reliably; sentences and paragraphs come out garbled.
+- End the prompt with `No other text.` Without it, models tend to invent slogans, taglines and labels the user never asked for. Short exclusions like this one (or `no watermark`, `no logos`) at the end of a prompt are followed; elsewhere, describe what should be there rather than what shouldn't.
 - Use the highest resolution or quality the chosen model supports (`2K` on `seedream-5-0-flash`, `quality: "high"` or above on OpenAI). When several keys are set, prefer OpenAI for text-heavy images.
 - If a word comes out misspelled, regenerate with the word spelled out: `the brand name "Ployo" (spelled P-L-O-Y-O)`.
 
@@ -214,7 +215,7 @@ Supported parameters, from the model's `/endpoints` listing (single endpoint, pr
 
 Not supported on this model: `quality`, `output_compression`, `stream`, `frame_count`/`frame_duration_ms`, and `provider.options` passthrough (none allowed).
 
-**Pricing:** $0.018 per output image; input reference images are free.
+**Pricing:** 0.018 USD per output image; input reference images are free.
 
 **Response:** `data[0].b64_json` contains the base64-encoded image; `data[0].media_type` (e.g. `image/png`) identifies the format — use it to pick the file extension. `usage.cost` reports the USD cost of the generation. With `response_format: "url"`, `data[0].url` is a signed download link (expires after 24 hours, per `expires_at`).
 
