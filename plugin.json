@@ -1,6 +1,6 @@
 {
   "name": "skill-image-gen",
-  "description": "AI image generation skill for coding workflows — powered by OpenAI (gpt-image-2, gpt-image-2.5/2.6), Google Gemini (Nano Banana 2.1, Nano Banana Pro), and OpenRouter (default bytedance-seed/seedream-5-0-flash). BYO API key — the skill guides you through setup on first use.",
+  "description": "AI image generation skill for coding workflows — powered by OpenAI (gpt-image-2, gpt-image-2.5/2.6), Google Gemini (Nano Banana 2.1, Nano Banana Pro), and OpenRouter (default black-forest-labs/flux-3-image-klein at 4K). BYO API key — the skill guides you through setup on first use.",
   "version": "1.2.0",
   "author": {
     "name": "coronas2k",
