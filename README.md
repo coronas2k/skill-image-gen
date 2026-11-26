@@ -13,6 +13,8 @@ An agent plugin that gives your AI coding assistant the ability to generate imag
 
 - **Three providers:** OpenAI (`gpt-image-2`, `gpt-image-2.5`/`2.6`), Google Gemini (Nano Banana 2.1, Nano Banana Pro), and OpenRouter (multi-model, default `black-forest-labs/flux-3-image-klein` at 4K)
 - **Zero config up front** — the skill onboards you the first time you use it
+- **Asks before it spends** — each time, it asks about model, size, shape and style (with prices), skipping anything your request already says
+- **One generation script** — `scripts/imagegen.py` (Python 3, standard library only) handles every provider, checks options against OpenRouter's live model data before sending, and keeps API keys out of commands and output
 - **Better prompts** — short requests are expanded into full descriptions, with rules for rendering text inside images
 - **Prompt records** — each image is saved with a `.json` file holding the exact prompt, model, settings and cost
 - **Cross-tool compatible** — works in VS Code, Copilot CLI, and Claude Code
@@ -65,7 +67,16 @@ Just ask your AI assistant to generate an image:
 - *"Create a seamless grass texture for my game"*
 - *"Make an app icon for a weather app"*
 
-The skill takes care of the rest — including walking you through API key setup if it's your first time.
+The skill asks a few quick questions (model, size, shape, style), writes a detailed prompt, and saves the image with a `.json` record of exactly what was sent. The first time, it walks you through API key setup.
+
+Requires Python 3.8 or newer. You can also run the script yourself:
+
+```bash
+python3 skills/generate-image/scripts/imagegen.py options --provider openrouter
+python3 skills/generate-image/scripts/imagegen.py generate --name hero --prompt "..." --aspect 16:9 --dry-run
+```
+
+Run the offline tests with `python3 -m unittest discover -s skills/generate-image/scripts`.
 
 ## 📁 Structure
 
@@ -74,7 +85,10 @@ skill-image-gen/
 ├── plugin.json              # Plugin manifest
 ├── skills/
 │   └── generate-image/
-│       └── SKILL.md         # The skill — all logic lives here
+│       ├── SKILL.md         # The skill: workflow, questions, prompt writing, model notes
+│       └── scripts/
+│           ├── imagegen.py      # Calls OpenRouter, OpenAI and Gemini; saves images and records
+│           └── test_imagegen.py # Offline tests
 ├── install.sh               # CLI installer
 ├── README.md
 ├── CONTRIBUTING.md

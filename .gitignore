@@ -19,6 +19,7 @@ Thumbs.db
 
 # Generated images (don't commit test outputs)
 output/
+images/
 *.png
 *.jpg
 *.jpeg
@@ -28,3 +29,6 @@ output/
 node_modules/
 dist/
 *.vsix
+
+# Python
+__pycache__/

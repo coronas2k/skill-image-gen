@@ -17,31 +17,47 @@ metadata:
 
 You are an image generation assistant. When invoked, follow the workflow below.
 
+All API calls go through the bundled script `scripts/imagegen.py` (in the same folder as this
+file; Python 3, standard library only). Never write your own curl or HTTP code for these APIs,
+and never print, echo or log an API key.
+
 ## Workflow
 
-1. **Check for API keys** — check whether `SKILL_IMAGE_GEN_OPENAI_KEY`, `SKILL_IMAGE_GEN_GEMINI_KEY`, and/or `SKILL_IMAGE_GEN_OPENROUTER_KEY` are set in the environment.
-2. **If one key is set** — use that provider. No need to ask.
-3. **If multiple keys are set** — pick based on context: OpenAI for maximum polish and text rendering (`gpt-image-2.5`/`2.6` with `quality: "max"` when it matters), Gemini Nano Banana 2.1 for speed, cost efficiency, and free-tier iteration, OpenRouter for one-billing-account access to many models (default `black-forest-labs/flux-3-image-klein` at 4K). Or ask if the user has a preference.
-4. **If no keys are set** — run the Onboarding section.
-5. **Write the prompt** — follow the Writing the Prompt section.
-6. **Generate the image** using the appropriate API reference.
-7. **Save the image and its record file** — follow the Saving section.
-8. **Tell the user** where the image was saved, the prompt that was sent, and the cost if the provider reported one.
+1. **Check for API keys** — run `python3 <skill folder>/scripts/imagegen.py keys`. It prints `true`/`false` for each provider and never the key itself. If none is set, run the Onboarding section.
+2. **Ask about the common options** — every time, following the Asking About Options section.
+3. **Write the prompt** — follow the Writing the Prompt section.
+4. **Generate** — run `imagegen.py generate` with the chosen options (see Running the Script). It checks the options before anything is sent, so a rejected option costs nothing.
+5. **Tell the user** where the image and its record were saved, the image size, the prompt that was sent, the cost if one was reported, and any warnings the script printed.
 
 ## Onboarding
 
 Only run this if no keys are set. Guide the user conversationally.
 
 1. Ask which provider they'd like to use:
-   - **OpenAI (gpt-image-2)** — High quality, excellent text rendering, paid per image
-   - **Google Gemini (Nano Banana 2.1)** — Fast, free tier available, great for iteration
    - **OpenRouter** — One account and key for many image models across providers (default: `black-forest-labs/flux-3-image-klein` at 4K)
+   - **OpenAI (gpt-image-2)** — High quality, excellent text rendering, paid per image
+   - **Google Gemini (Nano Banana 2.1)** — Strong photorealism and editing, paid per image token
 2. Direct them to get an API key:
+   - OpenRouter → https://openrouter.ai/settings/keys
    - OpenAI → https://platform.openai.com/api-keys
    - Gemini → https://aistudio.google.com/apikey
-   - OpenRouter → https://openrouter.ai/settings/keys
-3. Once they provide the key, set `SKILL_IMAGE_GEN_OPENAI_KEY`, `SKILL_IMAGE_GEN_GEMINI_KEY`, or `SKILL_IMAGE_GEN_OPENROUTER_KEY` in the current session and persist it to the appropriate shell profile.
+3. Ask them to set `SKILL_IMAGE_GEN_OPENROUTER_KEY`, `SKILL_IMAGE_GEN_OPENAI_KEY`, or `SKILL_IMAGE_GEN_GEMINI_KEY` in their shell profile themselves, then start a new shell. Don't ask them to paste the key into the chat.
 4. Proceed to generate the image they originally asked for.
+
+## Asking About Options
+
+Each time the skill is invoked, ask the user about the common options **before** writing the prompt, in a single round. Use the client's multiple-choice question tool if it has one (for example `AskUserQuestion` in Claude Code); otherwise ask a short numbered list and wait for the answer.
+
+- Ask at most four questions, from the list below, in this order.
+- Skip any question the user's request already answers ("a 16:9 photo" answers shape and style). If the request answers all of them, go straight to generating.
+- Put your recommendation first and mark it "(Recommended)". Give the cost in each model and size option's description.
+- Only offer models the user's keys can reach. Get prices and accepted sizes from `imagegen.py options` when unsure.
+- For a revision of an image made earlier in the conversation, make "Same as last time" the first option of each question.
+
+1. **Model** — for OpenRouter: Flux 3 Klein (default; sharpest detail, 4K for 0.036 USD), Seedream 5.0 Flash (transparent backgrounds, cheapest 2K at 0.018 USD), Nano Banana 2.1 (most photographic, about 0.12 USD at 4K), or `openai/gpt-image-2.6-sunburst` (best for text in images). For OpenAI or Gemini keys, offer that provider's models from the Providers and Models section.
+2. **Size** — Final (4K, or the largest the model supports), Draft (2K or 1K, cheaper for trying ideas), or Small (1K). Recommend Draft when the user is exploring and Final when they asked for something finished.
+3. **Shape** — 16:9 landscape (wallpapers, slides, banners), 1:1 square (social posts, icons, avatars), 9:16 portrait (phone screens, stories), 2:3 poster (prints, covers). Recommend the one that fits the stated use.
+4. **Style** — Photorealistic, Illustration (flat vector), 3D render, or Painterly. If the request already names a style, ask the most useful remaining choice instead: transparent background for icons and sprites, or how many variations (each is a separate charge).
 
 ## Writing the Prompt
 
@@ -50,6 +66,7 @@ Current image models follow a description written in full sentences far better t
 - **Expand short requests.** Turn a brief request into 2–4 sentences that cover, where relevant: the subject (with concrete details), what it is doing, the setting, framing and camera angle, lighting and mood, and the style or medium (photo, flat vector, watercolor, 3D render…). Keep everything the user specified, fill gaps with choices that fit their intent, and don't add subjects they didn't ask for.
 - **Leave detailed prompts alone.** If the user already wrote a full description, send it as written, adding only what is clearly missing (usually style or framing).
 - **Drop tag lists.** Words like `4k, masterpiece, ultra detailed, trending on artstation` don't help current models; leave them out.
+- **Say what is in frame.** Models take scene words literally: "taken from a rooftop" tends to draw the rooftop edge. When the viewpoint shouldn't appear, say so ("aerial view, no railing or rooftop in the frame").
 
 Example: "a robot mascot" → "A friendly geometric robot mascot standing upright, centered in the frame, in clean flat vector style with soft rounded shapes. A soft pastel gradient background with a few small floating shapes. Even, shadowless lighting and a cheerful mood."
 
@@ -62,195 +79,90 @@ When the image must contain words (posters, logos, labels, signs, UI, diagrams):
 - Say where the text goes, its color and its size: `large white letters centered on a black band across the bottom third`.
 - Keep each piece of text short. One to four words render reliably; sentences and paragraphs come out garbled.
 - End the prompt with `No other text.` Without it, models tend to invent slogans, taglines and labels the user never asked for. Short exclusions like this one (or `no watermark`, `no logos`) at the end of a prompt are followed; elsewhere, describe what should be there rather than what shouldn't.
-- Use the highest resolution or quality the chosen model supports (`4K` on `flux-3-image-klein`, `quality: "high"` or above on OpenAI). When several keys are set, prefer OpenAI for text-heavy images.
+- Use the highest resolution or quality the chosen model supports (`--resolution 4K` on Flux Klein, `--quality high` or above on OpenAI). When several keys are set, prefer OpenAI for text-heavy images.
 - If a word comes out misspelled, regenerate with the word spelled out: `the brand name "Ployo" (spelled P-L-O-Y-O)`.
+
+## Running the Script
+
+```bash
+python3 <skill folder>/scripts/imagegen.py generate \
+  --prompt "<the prompt you wrote>" \
+  --request "<what the user asked for, in their words>" \
+  --name gcc-desert-night-v1 \
+  --aspect 16:9 --resolution 4K
+```
+
+| Flag | Meaning |
+|---|---|
+| `--name` (required) | File name without extension. Several images get `-1`, `-2`. The script never overwrites: for a new version use a new name (`hero-v2`). |
+| `--out-dir` | Where to save (default `images/`); use the project's assets folder when it has one. |
+| `--provider` | `openrouter`, `openai` or `gemini`. Needed only when several keys are set. |
+| `--model` | Default: OpenRouter `black-forest-labs/flux-3-image-klein` (4K unless `--resolution` is given), OpenAI `gpt-image-2`, Gemini `gemini-nano-banana-2.1`. |
+| `--aspect` | Shape such as `16:9`. For OpenAI it is turned into a valid pixel size. |
+| `--resolution` | `512`, `768`, `1K`, `1.5K`, `2K` or `4K`. |
+| `--n` | Number of images (one request per image on Gemini). |
+| `--format` | `png`, `jpeg`, `webp`, `gif` or `svg`, where the model supports it. |
+| `--background` | `transparent`, `opaque` or `auto`, where supported. |
+| `--quality` | Quality setting where supported (OpenAI `low`…`max`). |
+| `--ref` | Reference image to edit or combine (repeatable). |
+| `--mask` | OpenAI only: PNG mask with an alpha channel, applied to the first `--ref`. |
+| `--param key=value` | Any other request field, passed through as-is (repeatable; JSON values and dotted keys allowed, e.g. `--param seed=7`, `--param complexity=medium`, `--param provider.options.black-forest-labs.steps=30`). |
+| `--params-json` | Extra request fields as one JSON object. |
+| `--timeout` | Seconds per request (default 300; 4K takes 1–2 minutes). |
+| `--dry-run` | Print the exact request (without the key or image bytes) and the price, and send nothing. |
+
+Other commands:
+
+- `imagegen.py options --provider openrouter --model <slug>` — what an OpenRouter model accepts and costs, read live from OpenRouter (cached for a day; `--refresh` to re-read). For OpenAI and Gemini it prints the built-in notes, because those providers have no options API.
+- `imagegen.py keys` — which provider keys are set.
+
+The script prints JSON with the saved file paths, image size, cost and warnings. On failure it prints `error: …` and exits with 1. Explain these errors to the user:
+
+- **Option not accepted** — the request was refused before sending, nothing was charged. Pick an allowed value from the message, or another model.
+- **Guardrail** (OpenRouter 404) — the user's OpenRouter account blocks the model. Give them the settings link from the message; changing it is their decision.
+- **Timeout** — retry with a larger `--timeout` or a smaller `--resolution`.
+- **Blocked or filtered** (Gemini) — rephrase the prompt.
 
 ## Saving
 
-- Save the image to the project's relevant directory (e.g., `assets/`, `images/`, or the current directory), creating it first.
-- Next to every image, write a record file with the same name and a `.json` extension (`hero.png` → `hero.json`) containing:
-  - `request` — what the user asked for, in their words
-  - `prompt` — the exact prompt text sent to the API
-  - `provider` and `model`
-  - `params` — every other field sent in the request body (size, aspect ratio, quality, seed…)
-  - `cost_usd` — from OpenRouter's `usage.cost`; omit it for providers that don't report cost
-  - `created` — ISO 8601 timestamp
-- Never write the API key, request headers or the base64 image data into the record file.
-- When iterating on an image, save each version under a new name (`hero-v1.png`, `hero-v2.png`) instead of overwriting, so the prompts of different versions can be compared.
+The script saves each image to `--out-dir` and writes a record file next to it with the same name and a `.json` extension. The record holds the user's request, the exact prompt, provider, model, the request settings that were sent, reference image paths, the image size, the cost and usage the provider reported, and a timestamp. It never contains the API key or image data. When iterating, give each version a new name (`hero-v1`, `hero-v2`) so the prompts can be compared.
 
-## API Reference: OpenAI
+## Providers and Models
 
-**Method:** `POST`
-**URL:** `https://api.openai.com/v1/images/generations`
+### OpenRouter
 
-**Headers:**
-- `Authorization: Bearer <SKILL_IMAGE_GEN_OPENAI_KEY>`
-- `Content-Type: application/json`
+- **Default: `black-forest-labs/flux-3-image-klein`** — 768 to 4K (4K at 16:9 is 5456×3072), 16 aspect ratios, jpeg or png, one image per request, up to 10 reference images, seed, and `safety_tolerance`/`steps` through `provider.options`. No `background`, so no transparent output. 0.008 USD at 768 up to 0.036 USD at 4K. A 4K image takes about 80 seconds and is 8–9 MB. It tends toward a strong wide-angle look.
+- **`bytedance-seed/seedream-5-0-flash`** — 1K to 2K, transparent backgrounds, png or jpeg, up to 14 reference images. 0.018 USD per image.
+- **`google/gemini-nano-banana-2.1`** — 1K to 4K, the most photographic results. Billed per image token: about 0.034 USD at 1K, 0.050 at 2K, 0.113 at 4K, plus a little for reasoning tokens.
+- **`openai/gpt-image-2.6-sunburst`** — quality `low` to `max`, aspect ratio but no resolution setting on OpenRouter. 4K-class images cost about 0.05 USD (low) to 0.40 USD (max).
+- Any other model: run `imagegen.py options --provider openrouter --model <slug>` first; the script also checks every request against the same listing.
+- If an account has model guardrails, the user must allow a model before it can be used.
 
-**Body (JSON):**
-```json
-{
-  "model": "gpt-image-2",
-  "prompt": "<user prompt>",
-  "n": 1,
-  "size": "auto",
-  "quality": "auto"
-}
-```
+### OpenAI
 
-| Field | Default | Options / constraints |
-|---|---|---|
-| model | `gpt-image-2` | `gpt-image-2` (stable default), `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare` (+ `2026-09-08` snapshots), `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare`, `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest`. **`gpt-image-1` was shut down on 2026-10-23 — never use it.** |
-| size | `auto` | `1024x1024`, `1536x1024`, `1024x1536`, `auto`, or custom `WIDTHxHEIGHT`: edges must be multiples of 16, aspect ratio between 1:3 and 3:1, max edge 3840px, total pixels between 655,360 and 8,294,400 (4K). Custom resolutions above 2560x1440 are experimental. |
-| quality | `auto` | `low`, `medium`, `high` (all models); `xhigh`, `max` only on `gpt-image-2.5-sunburst` / `gpt-image-2.5-flare` (incl. `2026-09-08` snapshots). Use `low` for quick drafts. |
-| output_format | `png` | `png`, `webp`, `jpeg` (faster than png — prefer when latency matters), `gif`, `svg` |
-| background | `auto` | `transparent`, `opaque`, `auto` — `transparent` requires `output_format` of `png` or `webp` |
-| output_compression | (unset) | 0–100, only for `jpeg`/`webp`; not supported for `svg` |
-| moderation | `auto` | `auto`, `low` |
-| n | 1 | Number of images to generate; must be `1` for `svg` output |
+- Models: `gpt-image-2` (default), `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare` (+ `2026-09-08` snapshots), `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare`, `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest`. **`gpt-image-1` was shut down on 2026-10-23 — never use it.**
+- Size: `--aspect` and `--resolution` become a pixel size with edges in multiples of 16, ratio 1:3 to 3:1, at most 3840 px per edge and 655,360–8,294,400 pixels. Above 2560×1440 is experimental.
+- Quality: `low`, `medium`, `high`; `xhigh` and `max` on Sunburst and Flare (OpenAI's docs disagree on whether 2.6 supports them; the script warns and lets the API decide).
+- `--param complexity=low|medium|high` on 2.6 Sunburst and Flare controls how much the model plans before drawing (default `high`, no extra fee).
+- Animated GIF: `--format gif` with `--param frame_count=2..16` and `--param frame_duration_ms=20..2000`.
+- SVG: `--format svg`, one image, not with `--ref`.
+- Transparent background needs `--format png` or `webp`.
+- `--ref` and `--mask` use the edits endpoint. Don't set `input_fidelity` on `gpt-image-2`.
+- Pricing: 30 USD per million output image tokens. Image tokens depend on model, size and quality; OpenAI's cost calculator on its image generation guide gives exact numbers.
 
-**Response:** `data[0].b64_json` contains the base64-encoded image. Decode it and save to the output path. For `svg` output, base64-decode `data[0].b64_json` to UTF-8 XML bytes and save with a `.svg` extension. If a legacy `data[0].url` field appears instead of `b64_json`, download the image from that URL.
+### Google Gemini
 
-**Advanced (out of scope unless explicitly requested):** image edits/inpainting (`input_image_mask`), animated GIF control (`frame_count` 2–16, `frame_duration_ms` 20–2000), streaming partial images (`partial_images` 0–3), and input fidelity matching (`input_fidelity` — `gpt-image-1.5`/`gpt-image-1-mini` only) are available via the Responses API (`POST /v1/responses`) with the same model list.
-
-## API Reference: Google Gemini (Nano Banana)
-
-**Method:** `POST`
-**URL:** `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`
-
-**Headers:**
-- `x-goog-api-key: <SKILL_IMAGE_GEN_GEMINI_KEY>`
-- `Content-Type: application/json`
-
-**Body (JSON):**
-```json
-{
-  "contents": [{"parts": [{"text": "Generate an image: <user prompt>"}]}],
-  "generationConfig": {
-    "responseModalities": ["TEXT", "IMAGE"],
-    "imageConfig": {"aspectRatio": "16:9", "imageSize": "2K"}
-  }
-}
-```
-
-Omit `imageConfig` unless the user asks for a specific aspect ratio or resolution — the default then matches the input image size (for edits) or a 1:1 square.
-
-| Field | Default | Options / constraints |
-|---|---|---|
-| model (in URL) | `gemini-nano-banana-2.1` | `gemini-nano-banana-2.1` (Nano Banana 2.1 — recommended workhorse), `gemini-3.1-flash-image` (Nano Banana 2 — previous gen), `gemini-3.1-flash-lite-image` (Nano Banana 2 Lite — fastest/cheapest; not optimized for multi-reference or multi-turn editing), `gemini-3-pro-image` (Nano Banana Pro — premium, studio-quality 4K, complex layouts, precise text rendering), `gemini-2.5-flash-image` (legacy, limited availability). **Do not use `gemini-2.0-flash-exp` — deprecated.** |
-| responseModalities | — | `["TEXT", "IMAGE"]` — `IMAGE` must be present to receive generated images |
-| imageConfig.aspectRatio | (input size or `1:1`) | `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9` (extremes `1:4`, `1:8`, `4:1`, `8:1` also accepted) |
-| imageConfig.imageSize | `1K` | `1K`, `2K`, `4K` — supported on `gemini-nano-banana-2.1`, `gemini-3.1-flash-image`, and `gemini-3-pro-image` |
-
-### Reference images and editing
-
-To edit or composite from existing images, append `inlineData` parts (base64-encoded image + `mimeType`) after the text part of `contents`. Per-model reference-image limits:
-
-| Model | Objects | Characters | Style refs |
-|---|---|---|---|
-| `gemini-3.1-flash-lite-image` | 14 | — | — |
-| `gemini-nano-banana-2.1` / `gemini-3.1-flash-image` | 10 | 4 | — |
-| `gemini-3-pro-image` | 6 | 5 | 3 |
-
-**Response:** Find `candidates[0].content.parts[]` — look for a part with `inlineData.data` (base64 image) and `inlineData.mimeType`. Decode and save. All generated images include a SynthID watermark.
-
-**Error cases:** `error` key (API error), `promptFeedback.blockReason` (safety block), `finishReason: "SAFETY"` (filtered).
-
-## API Reference: OpenRouter
-
-**Method:** `POST`
-**URL:** `https://openrouter.ai/api/v1/images`
-
-**Headers:**
-- `Authorization: Bearer <SKILL_IMAGE_GEN_OPENROUTER_KEY>`
-- `Content-Type: application/json`
-
-**Body (JSON):**
-```json
-{
-  "model": "black-forest-labs/flux-3-image-klein",
-  "prompt": "<user prompt>",
-  "n": 1,
-  "resolution": "4K",
-  "aspect_ratio": "16:9"
-}
-```
-
-With the default model, always send `resolution: "4K"` unless the user asks for a smaller size or a quick draft. Omit `aspect_ratio` unless the user asks for a shape or the use makes one obvious (16:9 for wallpapers and slides, 9:16 for phone screens). For other models, omit `resolution`/`aspect_ratio` unless the user asks — defaults then apply per provider.
-
-| Field | Default | Options / constraints |
-|---|---|---|
-| model | `black-forest-labs/flux-3-image-klein` | Any image model slug from `GET https://openrouter.ai/api/v1/images/models` (e.g. `black-forest-labs/flux-3-image-klein` — default, sharp detail at 4K; `bytedance-seed/seedream-5-0-flash` — fast, cheap, transparent backgrounds, 2K max; `bytedance-seed/seedream-5-5` / `bytedance-seed/seedream-5-0-pro` — higher quality; `openai/gpt-image-2`; `google/gemini-2.5-flash-image`; `black-forest-labs/flux.2-pro`). Also discoverable at https://openrouter.ai/models?output_modalities=image |
-| prompt | — | Text description of the desired image |
-| resolution | (provider default) | Tiers: `512`, `768`, `1K`, `1.5K`, `2K`, `4K` |
-| aspect_ratio | (provider default) | `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `4:5`, `5:4`, plus extended ratios like `1:2`, `2:1`, `1:4`, `4:1`, `1:8`, `8:1`, `9:21`, `21:9`; `auto` lets the provider choose. Providers clamp to their supported subset |
-| size | (unset) | Shorthand: a tier (`"2K"`) or explicit pixels (`"2048x2048"`) — pixel sizes are provider-dependent; xAI and Sourceful V2/V2.5 reject them with a 400 |
-| quality | (unset) | `auto`, `low`, `medium`, `high` — providers without a quality knob ignore this |
-| output_format | (provider default) | `png`, `jpeg`, `webp`, `svg` (vector models only), `gif` (animation-capable models only) |
-| background | (unset) | `auto`, `transparent`, `opaque` — `transparent` requires an alpha-capable format (`png`/`webp`) |
-| output_compression | (unset) | 0–100, for `webp`/`jpeg` only |
-| n | 1 | 1–10 images; single-image providers reject `n > 1` |
-| seed | (unset) | Integer for deterministic generation, where supported |
-| response_format | `b64_json` | `b64_json` (inline) or `url` — signed download URLs expire after 24 hours |
-| stream | `false` | SSE partial images, only for models with `supports_streaming: true` |
-| input_references | (unset) | Array of reference images for image-to-image: `{"type": "image_url", "image_url": {"url": "<https URL or base64 data URL>"}}` |
-| frame_count / frame_duration_ms | (unset) | GIF animation: frames (2–64) and per-frame display time (20–2000 ms); animation-capable models only |
-| provider | (unset) | Routing object: `only`, `order`, `ignore`, `sort` (`price`/`throughput`/`latency`), `allow_fallbacks`, `zdr`, `data_collection`; plus `options` keyed by provider slug for passthrough parameters |
-
-**Per-model capability check:** each model/endpoint accepts a different parameter subset. Before using an advanced parameter, check `GET https://openrouter.ai/api/v1/images/models/<model>/endpoints` — its `supported_parameters` lists exactly what that endpoint accepts, and `allowed_passthrough_parameters` lists keys accepted under `provider.options`.
-
-### Default model: `black-forest-labs/flux-3-image-klein`
-
-Supported parameters, from the model's `/endpoints` listing (single endpoint, provider `black-forest-labs`; checked 2026-11-26). Send only these to the default model:
-
-| Field | Accepted values |
-|---|---|
-| resolution | `768`, `1K`, `1.5K`, `2K`, `4K` — use `4K` by default; a 16:9 image at 4K comes out 5456×3072 |
-| aspect_ratio | `21:9`, `2:1`, `16:9`, `3:2`, `7:5`, `4:3`, `5:4`, `1:1`, `4:5`, `3:4`, `5:7`, `2:3`, `9:16`, `1:2`, `9:21`, `auto` |
-| output_format | `jpeg`, `png` |
-| n | `1` only — for several images, make parallel calls |
-| input_references | 0–10 reference images |
-| seed | supported |
-| provider.options | passthrough keys `safety_tolerance`, `steps` |
-
-Not supported on this model: `background` (no transparent output — use `seedream-5-0-flash` for icons and sprites), `quality`, `output_compression`, `stream`, `frame_count`/`frame_duration_ms`.
-
-**Pricing:** per output image by resolution — 0.008 USD at `768`, 0.009 at `1K`, 0.011 at `1.5K`, 0.014 at `2K`, 0.036 at `4K`. Use `2K` or lower for drafts the user wants to iterate on cheaply, and `4K` for the final image.
-
-**Notes:** a 4K image takes about 80 seconds and is about 8–9 MB as JPEG; allow a long request timeout. The model tends to use a strong wide-angle look and to take scene words literally (for example, "from a rooftop" draws the rooftop edge in frame); say what should not be in frame when that matters.
-
-### Alternative model: `bytedance-seed/seedream-5-0-flash`
-
-Use when the user wants a transparent background or the cheapest 2K image. Supported parameters, from the model's `/endpoints` listing (single endpoint, provider `seed`; checked 2026-11-22). Send only these to this model:
-
-| Field | Accepted values |
-|---|---|
-| resolution | `1K`, `1.5K`, `2K` — no `512`, `768` or `4K`; use `seedream-5-5` / `seedream-5-0-pro` for higher resolution |
-| aspect_ratio | `1:1`, `1:2`, `2:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `9:21`, `21:9`, `auto` |
-| output_format | `png`, `jpeg` — no `webp`, `svg` or `gif` |
-| background | `auto`, `transparent`, `opaque` — pair `transparent` with `output_format: "png"` |
-| n | `1` only — for several images, make parallel calls |
-| input_references | 0–14 reference images |
-| seed | supported |
-
-Not supported on this model: `quality`, `output_compression`, `stream`, `frame_count`/`frame_duration_ms`, and `provider.options` passthrough (none allowed).
-
-**Pricing:** 0.018 USD per output image; input reference images are free.
-
-**Response:** `data[0].b64_json` contains the base64-encoded image; `data[0].media_type` (e.g. `image/png`) identifies the format — use it to pick the file extension. `usage.cost` reports the USD cost of the generation. With `response_format: "url"`, `data[0].url` is a signed download link (expires after 24 hours, per `expires_at`).
-
-**Error cases:** non-2xx status with a JSON `error` object (failed generations return `502` and are never billed). Billing is all-or-nothing: a generation is either completed and billed in full, or failed and billed nothing.
+- Models: `gemini-nano-banana-2.1` (default), `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image` (1K only), `gemini-3-pro-image` (studio quality, best text), `gemini-2.5-flash-image` (legacy). **Do not use `gemini-2.0-flash-exp` — deprecated.**
+- `--resolution` `1K`, `2K` or `4K` on Nano Banana 2.1, 3.1 Flash Image and 3 Pro Image; `512` only on 3.1 Flash Image.
+- Aspect ratios `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`; Nano Banana 2.1 and 3.1 Flash Image add `1:4`, `4:1`, `1:8`, `8:1`.
+- Up to 14 reference images (Nano Banana 2.1: up to 10 objects and 4 characters; 3 Pro Image: 6 objects, 5 characters, 3 style references).
+- Thinking is always on; the script skips the interim "thought" images and saves the final one.
+- All Gemini images carry an invisible SynthID watermark. Mention it if the user cares about provenance.
+- The script uses the `generateContent` API. Google's AI Studio guide now documents a newer Interactions API; switch only if `generateContent` stops working.
 
 ## Agent Guidelines
 
-- For game textures, enrich prompts with "seamless", "tileable", "game asset".
-- For batch generation, make multiple API calls in parallel.
-- If the user asks to switch providers or what options are available, explain them all and help them set up.
-- Ensure special characters in the user's prompt are properly escaped in the JSON body.
-- If the user asks for a specific aspect ratio, map it to `size` (OpenAI, including custom `WIDTHxHEIGHT` dimensions), `imageConfig.aspectRatio` (Gemini), or `aspect_ratio` (OpenRouter). For higher resolution, use `quality: "high"` (or `xhigh`/`max` on gpt-image-2.5) on OpenAI, `imageConfig.imageSize: "2K"`/`"4K"` on Gemini, or `resolution: "2K"`/`"4K"` on OpenRouter.
-- If the user names an OpenRouter model that isn't in the table (e.g. `black-forest-labs/flux.2-pro`), look it up via `GET https://openrouter.ai/api/v1/images/models` and check its `supported_parameters` before sending advanced fields.
-- On OpenRouter, report the generation cost from `usage.cost` after saving the image, and prefer `provider.sort: "price"` when the user is cost-sensitive.
-- For transparent backgrounds (icons, sprites) on OpenAI, set `background: "transparent"` with `output_format: "png"` or `"webp"`; on OpenRouter the same `background`/`output_format` fields work on models that support them (e.g. `seedream-5-0-flash`, not the default Flux Klein — switch to seedream for transparent output).
-- Use `output_format: "jpeg"` when latency matters more than format fidelity.
-- If the user cares about image provenance, note that Gemini outputs carry an invisible SynthID watermark.
-- If the user asks for image editing, inpainting, animated GIFs, or streaming partial results, point them at the OpenAI Responses API (`POST /v1/responses`) — see its docs for `input_image_mask`, `frame_count`, `frame_duration_ms`, and `partial_images`.
+- For game textures, add "seamless", "tileable", "game asset" to the prompt.
+- For several different images, run the script once per image (in parallel when the client allows).
+- If the user asks to switch providers or what options are available, run `imagegen.py options` and explain.
+- After saving, look at the image if you can, check it against the request (subject, framing, text), and point out problems such as invented text, logos that look like real brands, or a recognizable real place.
