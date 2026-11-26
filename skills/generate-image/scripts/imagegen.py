@@ -17,10 +17,12 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as _dt
+import http.client
 import json
 import math
 import mimetypes
 import os
+import socket
 import struct
 import sys
 import time
@@ -53,6 +55,9 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 RESOLUTION_LONG_EDGE = {"512": 512, "768": 768, "1K": 1024, "1.5K": 1536, "2K": 2048, "4K": 3840}
 
 USER_AGENT = "skill-image-gen/imagegen.py"
+# Largest generated image we will download from a provider URL. A 4K PNG is
+# well under this; the cap only stops a runaway or hostile response.
+MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "skill-image-gen"
 CACHE_TTL_SECONDS = 24 * 3600
 
@@ -67,7 +72,21 @@ def warn(msg: str) -> None:
 
 def available_providers(env=None) -> list[str]:
     env = os.environ if env is None else env
-    return [p for p, var in KEY_ENV.items() if env.get(var)]
+    return [p for p, var in KEY_ENV.items() if (env.get(var) or "").strip()]
+
+
+def read_key(provider: str, env=None) -> str:
+    """The provider's key with surrounding whitespace removed ("" when unset).
+
+    A key that still holds whitespace or control characters is refused
+    without showing it: urllib would otherwise echo it in a ValueError.
+    """
+    env = os.environ if env is None else env
+    key = (env.get(KEY_ENV[provider]) or "").strip()
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in key):
+        raise ImageGenError(f"{KEY_ENV[provider]} contains whitespace or control characters; "
+                            "set it again with only the key")
+    return key
 
 
 def pick_provider(requested: str | None, env=None) -> str:
@@ -89,25 +108,45 @@ def pick_provider(requested: str | None, env=None) -> str:
 # HTTP (key stays inside this process)
 # --------------------------------------------------------------------------
 
-def _request(method, url, headers=None, body: bytes | None = None, timeout=300):
+class _NoDowngradeRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never from https to anything else."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.full_url.lower().startswith("https:") and not newurl.lower().startswith("https:"):
+            raise ImageGenError("refusing a redirect from https to a non-https URL")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_NoDowngradeRedirects)
+
+# socket.timeout is only an alias of TimeoutError from Python 3.10 on.
+_TIMEOUTS = (TimeoutError, socket.timeout)
+
+
+def _request(method, url, headers=None, body: bytes | None = None, timeout=300, max_bytes=None):
     req = urllib.request.Request(url, data=body, method=method)
     req.add_header("User-Agent", USER_AGENT)
     for k, v in (headers or {}).items():
-        req.add_header(k, v)
+        # Unredirected: the key headers are never sent on to a redirect target.
+        req.add_unredirected_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(), resp.headers.get("Content-Type", "")
+        with _OPENER.open(req, timeout=timeout) as resp:
+            raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+            return resp.status, raw, resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers.get("Content-Type", "") if e.headers else ""
-    except TimeoutError:
+        raw = e.read() if max_bytes is None else e.read(max_bytes + 1)
+        return e.code, raw, e.headers.get("Content-Type", "") if e.headers else ""
+    except _TIMEOUTS:
         raise ImageGenError(
             f"request timed out after {timeout}s; 4K images can take 1-2 minutes, "
             "retry with a larger --timeout or a smaller --resolution"
         ) from None
     except urllib.error.URLError as e:
-        if isinstance(e.reason, TimeoutError):
+        if isinstance(e.reason, _TIMEOUTS):
             raise ImageGenError(f"request timed out after {timeout}s; retry with a larger --timeout") from None
         raise ImageGenError(f"network error: {e.reason}") from None
+    except (OSError, http.client.HTTPException) as e:
+        raise ImageGenError(f"network error ({type(e).__name__}); check the connection and retry") from None
 
 
 def _json_or_error(status, raw, provider):
@@ -252,6 +291,8 @@ def openai_size(aspect: str | None, resolution: str | None) -> str:
 
 
 def check_openai_size(size: str) -> None:
+    if not isinstance(size, str):
+        raise ImageGenError(f"size must be text such as 1536x1024 or auto, got {size!r}")
     if size in ("auto", "1024x1024", "1536x1024", "1024x1536"):
         return
     try:
@@ -281,7 +322,7 @@ def openai_warnings(model: str, body: dict) -> list[str]:
         out.append("OpenAI's API reference lists xhigh/max for 2.5 models only; the image guide includes 2.6")
     size = body.get("size", "auto")
     if size not in ("auto", "1024x1024", "1536x1024", "1024x1536"):
-        w, h = (int(v) for v in size.split("x"))
+        w, h = (int(v) for v in size.lower().split("x"))
         if w * h > 2560 * 1440:
             out.append(f"sizes above 2560x1440 are experimental ({size})")
     if "complexity" in body and not sunburst_flare:
@@ -429,6 +470,20 @@ def openrouter_price(endpoints: dict, resolution: str | None) -> str | None:
 # Request builders (pure: no network) -- easy to test and to dry-run
 # --------------------------------------------------------------------------
 
+def check_provider_field(prov) -> None:
+    """OpenRouter's `provider` field must be an object; its `options` maps slug -> object."""
+    hint = "; set it with --param provider.options.<slug>.<key>=<value>"
+    if prov is None:
+        return
+    if not isinstance(prov, dict):
+        raise ImageGenError("the provider field must be a JSON object" + hint)
+    opts = prov.get("options")
+    if opts is None:
+        return
+    if not isinstance(opts, dict) or not all(isinstance(v, dict) for v in opts.values()):
+        raise ImageGenError("provider.options must map each provider slug to a JSON object" + hint)
+
+
 def build_request(provider, model, prompt, *, aspect=None, resolution=None, n=1, fmt=None,
                   background=None, quality=None, refs=(), mask=None, extra=None, key="KEY"):
     """Return {method, url, headers, json|multipart, endpoint} for one call."""
@@ -455,6 +510,7 @@ def build_request(provider, model, prompt, *, aspect=None, resolution=None, n=1,
         if mask:
             raise ImageGenError("--mask is only supported with the openai provider")
         body.update(extra)
+        check_provider_field(body.get("provider"))
         return {"method": "POST", "url": f"{OPENROUTER_BASE}/images", "endpoint": "images",
                 "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, "json": body}
 
@@ -557,10 +613,18 @@ def send(req: dict, provider: str, timeout: int) -> dict:
 # --------------------------------------------------------------------------
 
 def _download(url, timeout):
-    status, raw, ctype = _request("GET", url, timeout=timeout)
+    """Fetch a generated image from a URL the provider returned (untrusted)."""
+    if not isinstance(url, str) or not url.lower().startswith("https://"):
+        raise ImageGenError("refusing to download the generated image from a non-https URL")
+    status, raw, _ctype = _request("GET", url, timeout=timeout, max_bytes=MAX_DOWNLOAD_BYTES)
     if not 200 <= status < 300:
         raise ImageGenError(f"downloading the generated image failed with HTTP {status}")
-    return raw, ctype.split(";")[0] or None
+    if len(raw) > MAX_DOWNLOAD_BYTES:
+        raise ImageGenError(f"the generated image is larger than {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB; not saved")
+    mime = sniff_mime(raw)
+    if not mime:
+        raise ImageGenError("the downloaded file is not a PNG, JPEG, GIF, WebP or SVG image; not saved")
+    return raw, mime
 
 
 def parse_images(provider: str, data: dict, *, fmt=None, timeout=300, downloader=_download) -> list[tuple[bytes, str]]:
@@ -584,20 +648,32 @@ def parse_images(provider: str, data: dict, *, fmt=None, timeout=300, downloader
         feedback = data.get("promptFeedback") or {}
         if feedback.get("blockReason"):
             raise ImageGenError(f"gemini blocked the prompt: {feedback['blockReason']}")
+        texts = []
         for cand in data.get("candidates") or []:
             finish = cand.get("finishReason")
             for part in (cand.get("content") or {}).get("parts") or []:
                 if part.get("thought"):
                     continue  # interim "thought" images are not the result
+                if isinstance(part.get("text"), str):
+                    texts.append(part["text"])
                 inline = part.get("inlineData") or part.get("inline_data")
                 if inline and inline.get("data"):
                     images.append((base64.b64decode(inline["data"]),
                                    inline.get("mimeType") or inline.get("mime_type") or "image/png"))
             if not images and finish and finish not in ("STOP", "MAX_TOKENS"):
-                raise ImageGenError(f"gemini returned no image (finishReason {finish})")
+                raise ImageGenError(f"gemini returned no image (finishReason {finish})" + _model_said(texts))
+        if not images and texts:
+            raise ImageGenError("gemini returned no image" + _model_said(texts))
         return images
 
     raise ImageGenError(f"unknown provider {provider}")
+
+
+def _model_said(texts: list[str], limit: int = 300) -> str:
+    said = " ".join(t.strip() for t in texts).strip()
+    if not said:
+        return ""
+    return "; the model said: " + (said[:limit] + "..." if len(said) > limit else said)
 
 
 def sniff_mime(raw: bytes) -> str | None:
@@ -660,19 +736,66 @@ def image_dimensions(raw: bytes) -> tuple[int, int] | None:
 # Saving
 # --------------------------------------------------------------------------
 
-def output_paths(out_dir: Path, name: str, count: int, exts: list[str]) -> list[Path]:
+SAVED_EXTS = sorted(set(EXT.values()) | {"jpeg", "json"})  # every file a stem can own
+
+
+def check_name(name: str) -> None:
     if not name or "/" in name or name.startswith("."):
         raise ImageGenError(f"--name must be a plain file name without extension, got {name!r}")
-    names = [name] if count == 1 else [f"{name}-{i}" for i in range(1, count + 1)]
-    return [out_dir / f"{n}.{ext}" for n, ext in zip(names, exts)]
 
 
-def check_free(paths: list[Path]) -> None:
-    taken = [p if p.exists() else p.with_suffix(".json") for p in paths
-             if p.exists() or p.with_suffix(".json").exists()]
+def check_out_dir(out_dir: Path) -> None:
+    if os.path.lexists(out_dir) and not out_dir.is_dir():
+        raise ImageGenError(f"--out-dir {out_dir} exists and is not a directory")
+
+
+def stem_for(name: str, index: int, planned: int) -> str:
+    """File name without extension for image number `index` (1-based) of `planned`."""
+    return name if planned == 1 and index == 1 else f"{name}-{index}"
+
+
+def taken_files(out_dir: Path, stem: str) -> list[Path]:
+    """Existing files (dangling symlinks included) that already use this stem."""
+    return [out_dir / f"{stem}.{e}" for e in SAVED_EXTS if os.path.lexists(out_dir / f"{stem}.{e}")]
+
+
+def check_free(out_dir: Path, name: str, planned: int) -> None:
+    """Refuse before paying when any planned name is in use under any image or record extension."""
+    taken = [p for i in range(1, planned + 1) for p in taken_files(out_dir, stem_for(name, i, planned))]
     if taken:
         raise ImageGenError("won't overwrite existing files: " + ", ".join(str(p) for p in taken)
                             + "; choose a new --name (for example add -v2)")
+
+
+def _write_new(path: Path, data: bytes) -> None:
+    """Create `path` exclusively: never overwrites, never follows an existing symlink."""
+    try:
+        with open(path, "xb") as f:
+            f.write(data)
+    except FileExistsError:
+        raise ImageGenError(f"won't overwrite existing file {path}; choose a new --name (for example add -v2)") from None
+    except OSError as e:
+        raise ImageGenError(f"can't write {path}: {e.strerror or type(e).__name__}") from None
+
+
+def save_image(out_dir: Path, stem: str, raw: bytes, ext: str) -> tuple[Path, bool]:
+    """Write a paid-for image under `stem`, or `stem-v2`, `-v3`... if that name is in use.
+
+    Returns the path and whether a fallback name was used. Never discards the image
+    because of a name clash.
+    """
+    candidate, version = stem, 1
+    while True:
+        if not taken_files(out_dir, candidate):
+            path = out_dir / f"{candidate}.{ext}"
+            try:
+                _write_new(path, raw)
+                return path, candidate != stem
+            except ImageGenError:
+                if not os.path.lexists(path):
+                    raise  # a real write error, not a clash
+        version += 1
+        candidate = f"{stem}-v{version}"
 
 
 def usage_and_cost(provider: str, data: dict) -> tuple[dict | None, float | None]:
@@ -696,16 +819,26 @@ def cmd_generate(args) -> int:
         resolution = default_resolution
     prompt = args.prompt
     if args.prompt_file:
-        prompt = Path(args.prompt_file).read_text().strip()
+        try:
+            prompt = Path(args.prompt_file).read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            raise ImageGenError(f"--prompt-file {args.prompt_file} is not UTF-8 text") from None
+        except OSError as e:
+            raise ImageGenError(f"can't read --prompt-file {args.prompt_file}: {e.strerror or type(e).__name__}") from None
     if not prompt:
         raise ImageGenError("a prompt is required (--prompt or --prompt-file)")
     if args.n < 1:
         raise ImageGenError("--n must be at least 1")
+    # The same output checks for a dry run and a real one, all before any money is spent.
+    out_dir = Path(args.out_dir)
+    check_name(args.name)
+    check_out_dir(out_dir)
+    check_free(out_dir, args.name, args.n)
 
     refs = [(*read_ref(p), p) for p in args.ref or []]
     mask = (*read_ref(args.mask), args.mask) if args.mask else None
     extra = parse_params(args.param, args.params_json)
-    key = os.environ.get(KEY_ENV[provider], "")
+    key = read_key(provider)
 
     calls = 1
     n_per_call = args.n
@@ -735,58 +868,69 @@ def cmd_generate(args) -> int:
                           "price": price, "warnings": warnings, "request": redact_for_display(req)}, indent=2))
         return 0
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Reserve names up front with a provisional extension so nothing is overwritten.
-    check_free(output_paths(out_dir, args.name, args.n, ["png"] * args.n))
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ImageGenError(f"can't create --out-dir {out_dir}: {e.strerror or type(e).__name__}") from None
 
     started = time.time()
-    images, usages, costs = [], [], []
-    for _ in range(calls):
-        data = send(req, provider, args.timeout)
-        got = parse_images(provider, data, fmt=args.format, timeout=args.timeout)
-        if not got:
-            raise ImageGenError(f"{provider} returned no image")
-        images.extend(got)
-        usage, cost = usage_and_cost(provider, data)
-        usages.append(usage)
-        if cost is not None:
-            costs.append(cost)
-    elapsed = round(time.time() - started, 1)
-
-    paths = output_paths(out_dir, args.name, len(images), [EXT.get(m, "png") for _, m in images])
-    check_free(paths)
     shown = redact_for_display(req)
     created = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-    results = []
-    for (raw, mime), path in zip(images, paths):
-        path.write_bytes(raw)
-        dims = image_dimensions(raw)
-        record = {
-            "request": args.request or prompt,
-            "prompt": prompt,
-            "provider": provider,
-            "model": model,
-            "endpoint": req["endpoint"],
-            "params": {k: v for k, v in (shown["body"] or {}).items() if k not in ("prompt", "model", "contents")},
-            "references": [p for _r, _m, p in refs] + ([args.mask] if args.mask else []),
-            "size": f"{dims[0]}x{dims[1]}" if dims else None,
-            "media_type": mime,
-            "created": created,
-        }
-        if provider == "gemini":
-            record["params"] = {"generationConfig": shown["body"].get("generationConfig")}
-        if costs:
-            record["cost_usd"] = round(sum(costs) / len(images), 6)
-        if any(usages):
-            record["usage"] = usages[0] if len(usages) == 1 else usages
-        path.with_suffix(".json").write_text(json.dumps(record, indent=2) + "\n")
-        results.append({"image": str(path), "record": str(path.with_suffix(".json")),
-                        "size": record["size"], "bytes": len(raw), "media_type": mime})
+    results, costs = [], []
+    failure = None
+    try:
+        for _ in range(calls):
+            data = send(req, provider, args.timeout)
+            got = parse_images(provider, data, fmt=args.format, timeout=args.timeout)
+            if not got:
+                raise ImageGenError(f"{provider} returned no image")
+            usage, cost = usage_and_cost(provider, data)
+            if cost is not None:
+                costs.append(cost)
+            # Save each paid image as soon as it arrives, so a later failure can't lose it.
+            for raw, mime in got:
+                stem = stem_for(args.name, len(results) + 1, args.n)
+                path, renamed = save_image(out_dir, stem, raw, EXT.get(mime, "png"))
+                if renamed:
+                    msg = f"{stem} was taken when the image arrived; saved as {path.name} instead"
+                    warnings.append(msg)
+                    warn(msg)
+                dims = image_dimensions(raw)
+                record = {
+                    "request": args.request or prompt,
+                    "prompt": prompt,
+                    "provider": provider,
+                    "model": model,
+                    "endpoint": req["endpoint"],
+                    "params": {k: v for k, v in (shown["body"] or {}).items() if k not in ("prompt", "model", "contents")},
+                    "references": [p for _r, _m, p in refs] + ([args.mask] if args.mask else []),
+                    "size": f"{dims[0]}x{dims[1]}" if dims else None,
+                    "media_type": mime,
+                    "created": created,
+                }
+                if provider == "gemini":
+                    record["params"] = {"generationConfig": shown["body"].get("generationConfig")}
+                if cost is not None:
+                    record["cost_usd"] = round(cost / len(got), 6)
+                if usage:
+                    record["usage"] = usage
+                record_path = path.with_suffix(".json")
+                _write_new(record_path, (json.dumps(record, indent=2) + "\n").encode("utf-8"))
+                results.append({"image": str(path), "record": str(record_path),
+                                "size": record["size"], "bytes": len(raw), "media_type": mime})
+    except Exception as e:
+        if not results:
+            raise
+        # Images are already on disk: still list them, and never echo an unexpected error's text.
+        failure = e if isinstance(e, ImageGenError) else ImageGenError(
+            f"unexpected {type(e).__name__} (details hidden because they can include a key)")
+    elapsed = round(time.time() - started, 1)
 
     print(json.dumps({"provider": provider, "model": model, "seconds": elapsed,
                       "cost_usd": round(sum(costs), 6) if costs else None,
                       "warnings": warnings, "images": results}, indent=2))
+    if failure is not None:
+        raise ImageGenError(f"{failure}\n{len(results)} image(s) were saved before the failure (listed on stdout)")
     return 0
 
 
@@ -794,7 +938,7 @@ def cmd_options(args) -> int:
     provider = args.provider or pick_provider(None)
     model = args.model or DEFAULTS[provider][0]
     if provider == "openrouter":
-        key = os.environ.get(KEY_ENV["openrouter"], "")
+        key = read_key("openrouter")
         data = openrouter_endpoints(model, key, use_cache=not args.refresh)
         out = {"provider": provider, "model": model, "source": "live /endpoints listing", "endpoints": []}
         for ep in data.get("endpoints") or []:
@@ -888,6 +1032,10 @@ def main(argv=None) -> int:
         return args.func(args)
     except ImageGenError as e:
         print(f"error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # last resort: the text of an unexpected error may contain a key
+        print(f"error: unexpected {type(e).__name__} (details hidden because they can include a key); "
+              "check the inputs, or run the same command with --dry-run", file=sys.stderr)
         return 1
 
 

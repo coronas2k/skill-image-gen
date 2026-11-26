@@ -2,13 +2,17 @@
 
 import base64
 import contextlib
+import http.server
 import io
 import json
 import os
+import socket
 import struct
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -241,12 +245,39 @@ class ProvidersAndFiles(unittest.TestCase):
     def test_names_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d)
-            self.assertEqual([p.name for p in ig.output_paths(out, "hero", 2, ["png", "jpg"])], ["hero-1.png", "hero-2.jpg"])
+            self.assertEqual([ig.stem_for("hero", i, 2) for i in (1, 2)], ["hero-1", "hero-2"])
+            self.assertEqual(ig.stem_for("hero", 1, 1), "hero")
             (out / "hero.json").write_text("{}")
             with self.assertRaises(ig.ImageGenError):
-                ig.check_free(ig.output_paths(out, "hero", 1, ["png"]))
+                ig.check_free(out, "hero", 1)
+            ig.check_free(out, "hero", 2)  # hero-1 / hero-2 are free
             with self.assertRaises(ig.ImageGenError):
-                ig.output_paths(out, "../escape", 1, ["png"])
+                ig.check_name("../escape")
+
+    def test_precheck_covers_every_extension(self):
+        # Regression: a clash on another extension (cat.jpg) used to be found only after paying.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "cat.jpg").write_bytes(b"old")
+            with self.assertRaises(ig.ImageGenError):
+                ig.check_free(Path(d), "cat", 1)
+
+    def test_exclusive_create_and_dangling_symlink(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            (out / "a.png").write_bytes(b"old")
+            with self.assertRaises(ig.ImageGenError):
+                ig._write_new(out / "a.png", b"new")
+            self.assertEqual((out / "a.png").read_bytes(), b"old")
+            # A dangling symlink counts as taken and is never followed.
+            target = out / "outside-target"
+            os.symlink(target, out / "b.png")
+            with self.assertRaises(ig.ImageGenError):
+                ig.check_free(out, "b", 1)
+            with self.assertRaises(ig.ImageGenError):
+                ig._write_new(out / "b.png", b"x")
+            path, renamed = ig.save_image(out, "b", b"img", "png")
+            self.assertEqual((path.name, renamed), ("b-v2.png", True))
+            self.assertFalse(os.path.lexists(target))
 
 
 class GenerateCommand(unittest.TestCase):
@@ -294,6 +325,204 @@ class GenerateCommand(unittest.TestCase):
         self.assertEqual(code, 1)
         sent.assert_not_called()
         self.assertIn("background not supported", err.getvalue())
+
+    def run_main_err(self, argv, env):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, out = self.run_main(argv, env)
+        return code, out, err.getvalue()
+
+    def test_clash_on_other_extension_stops_before_sending(self):
+        env = {"SKILL_IMAGE_GEN_OPENROUTER_KEY": "k"}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(ig, "openrouter_endpoints", return_value=FLUX_ENDPOINTS), \
+                mock.patch.object(ig, "send") as sent:
+            (Path(d) / "cat.jpg").write_bytes(b"old")
+            code, _, err = self.run_main_err(["generate", "--prompt", "p", "--name", "cat", "--out-dir", d,
+                                              "--format", "jpeg"], env)
+            self.assertEqual((Path(d) / "cat.jpg").read_bytes(), b"old")
+        self.assertEqual(code, 1)
+        sent.assert_not_called()
+        self.assertIn("won't overwrite", err)
+
+    def test_clash_after_paying_saves_under_fallback_name(self):
+        env = {"SKILL_IMAGE_GEN_OPENROUTER_KEY": "k"}
+        response = {"data": [{"b64_json": base64.b64encode(fake_png(4, 4)).decode(), "media_type": "image/png"}]}
+        with tempfile.TemporaryDirectory() as d:
+            def send(req, provider, timeout):  # another process takes the name while we wait
+                (Path(d) / "cat.png").write_bytes(b"theirs")
+                return response
+            with mock.patch.object(ig, "openrouter_endpoints", return_value=FLUX_ENDPOINTS), \
+                    mock.patch.object(ig, "send", side_effect=send):
+                code, out, _ = self.run_main_err(["generate", "--prompt", "p", "--name", "cat", "--out-dir", d], env)
+            self.assertEqual(code, 0)
+            self.assertEqual((Path(d) / "cat.png").read_bytes(), b"theirs")
+            self.assertEqual((Path(d) / "cat-v2.png").read_bytes(), fake_png(4, 4))
+            self.assertTrue((Path(d) / "cat-v2.json").is_file())
+        self.assertIn("saved as cat-v2.png", " ".join(json.loads(out)["warnings"]))
+
+    def test_gemini_later_failure_keeps_saved_images(self):
+        env = {"SKILL_IMAGE_GEN_GEMINI_KEY": "k"}
+        ok = {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(fake_png(8, 8)).decode()}}]}}]}
+        replies = [ok, ok, ig.ImageGenError("gemini returned HTTP 503: overloaded")]
+
+        def send(req, provider, timeout):
+            r = replies.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ig, "send", side_effect=send):
+            code, out, err = self.run_main_err(["generate", "--prompt", "p", "--name", "g", "--out-dir", d,
+                                                "--n", "3"], env)
+            files = sorted(os.listdir(d))
+        self.assertEqual(code, 1)
+        self.assertEqual(files, ["g-1.json", "g-1.png", "g-2.json", "g-2.png"])
+        self.assertEqual(len(json.loads(out)["images"]), 2)
+        self.assertIn("503", err)
+
+    def test_dry_run_validates_name_and_out_dir(self):
+        env = {"SKILL_IMAGE_GEN_OPENROUTER_KEY": "k"}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(ig, "openrouter_endpoints", return_value=FLUX_ENDPOINTS):
+            code, _, err = self.run_main_err(["generate", "--prompt", "p", "--name", "../x", "--dry-run"], env)
+            self.assertEqual(code, 1)
+            self.assertIn("--name", err)
+            a_file = Path(d) / "file"
+            a_file.write_text("")
+            code, _, err = self.run_main_err(["generate", "--prompt", "p", "--name", "x", "--out-dir", str(a_file),
+                                              "--dry-run"], env)
+            self.assertEqual(code, 1)
+            self.assertIn("not a directory", err)
+
+    def test_missing_prompt_file_is_a_clear_error(self):
+        code, _, err = self.run_main_err(["generate", "--prompt-file", "/nonexistent/prompt.txt", "--name", "x",
+                                          "--dry-run"], {"SKILL_IMAGE_GEN_OPENROUTER_KEY": "k"})
+        self.assertEqual(code, 1)
+        self.assertIn("can't read --prompt-file", err)
+
+
+class Secrets(unittest.TestCase):
+    def test_key_is_stripped_and_bad_key_refused_without_echo(self):
+        self.assertEqual(ig.read_key("openrouter", {"SKILL_IMAGE_GEN_OPENROUTER_KEY": " sk-DUMMY\r\n"}), "sk-DUMMY")
+        with self.assertRaises(ig.ImageGenError) as cm:
+            ig.read_key("openrouter", {"SKILL_IMAGE_GEN_OPENROUTER_KEY": "sk-DUM\nMY"})
+        self.assertNotIn("DUM", str(cm.exception))
+        self.assertEqual(ig.available_providers({"SKILL_IMAGE_GEN_GEMINI_KEY": "  "}), [])
+
+    def test_unexpected_error_hides_its_text(self):
+        err = io.StringIO()
+        with mock.patch.object(ig, "cmd_keys", side_effect=ValueError("Invalid header value b'Bearer sk-DUMMY'")), \
+                contextlib.redirect_stderr(err):
+            code = ig.main(["keys"])
+        self.assertEqual(code, 1)
+        self.assertIn("ValueError", err.getvalue())
+        self.assertNotIn("DUMMY", err.getvalue())
+
+
+def serve(handler):
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+class Quiet(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+class Network(unittest.TestCase):
+    def test_key_headers_do_not_follow_redirects(self):
+        seen = {}
+
+        class Target(Quiet):
+            def do_GET(self):
+                seen.update(self.headers.items())
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+        target = serve(Target)
+
+        class Redirect(Quiet):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(302)
+                self.send_header("Location", f"http://localhost:{target.server_port}/elsewhere")
+                self.end_headers()
+        redirect = serve(Redirect)
+        try:
+            status, _, _ = ig._request("POST", f"http://127.0.0.1:{redirect.server_port}/api",
+                                       {"Authorization": "Bearer DUMMY", "x-goog-api-key": "DUMMY"}, b"{}", timeout=5)
+        finally:
+            for srv in (target, redirect):
+                srv.shutdown()
+                srv.server_close()
+        self.assertEqual(status, 200)
+        self.assertTrue(seen, "redirect target was not reached")
+        self.assertNotIn("DUMMY", json.dumps(seen))
+
+    def test_https_redirect_may_not_downgrade(self):
+        req = urllib.request.Request("https://example.invalid/a")
+        with self.assertRaises(ig.ImageGenError):
+            ig._NoDowngradeRedirects().redirect_request(req, None, 302, "Found", {}, "http://example.invalid/b")
+
+    def test_read_timeout_is_friendly_on_every_python(self):
+        # Regression: on Python 3.8/3.9 socket.timeout is not TimeoutError and escaped as a traceback.
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        try:
+            with self.assertRaises(ig.ImageGenError) as cm:
+                ig._request("GET", f"http://127.0.0.1:{srv.getsockname()[1]}/", timeout=0.5)
+        finally:
+            srv.close()
+        self.assertIn("timed out", str(cm.exception))
+
+    def test_dropped_connection_is_friendly(self):
+        class Drop(Quiet):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                self.close_connection = True  # close without any reply
+        srv = serve(Drop)
+        try:
+            with self.assertRaises(ig.ImageGenError) as cm:
+                ig._request("GET", f"http://127.0.0.1:{srv.server_port}/", timeout=5)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertIn("network error", str(cm.exception))
+
+    def test_download_refuses_non_https_non_images_and_oversize(self):
+        for url in ["http://example.invalid/a.png", "file:///etc/hosts", "data:image/png;base64,AAAA"]:
+            with self.assertRaises(ig.ImageGenError, msg=url):
+                ig._download(url, 5)
+        with mock.patch.object(ig, "_request", return_value=(200, b"<html>hi</html>", "image/png")):
+            with self.assertRaises(ig.ImageGenError):
+                ig._download("https://example.invalid/a.png", 5)
+        with mock.patch.object(ig, "_request", return_value=(200, fake_png(2, 2) + b"\0" * 64, "image/png")), \
+                mock.patch.object(ig, "MAX_DOWNLOAD_BYTES", 32):
+            with self.assertRaises(ig.ImageGenError):
+                ig._download("https://example.invalid/a.png", 5)
+        with mock.patch.object(ig, "_request", return_value=(200, fake_png(2, 2), "application/octet-stream")):
+            self.assertEqual(ig._download("https://example.invalid/a.png", 5), (fake_png(2, 2), "image/png"))
+
+
+class BadInput(unittest.TestCase):
+    def test_non_string_size(self):
+        with self.assertRaises(ig.ImageGenError):
+            ig.build_request("openai", "gpt-image-2", "p", extra={"size": 1536})
+
+    def test_provider_field_must_be_object(self):
+        for bad in ["x", {"options": "x"}, {"options": {"bfl": "x"}}]:
+            with self.assertRaises(ig.ImageGenError, msg=bad):
+                ig.build_request("openrouter", "m", "p", extra={"provider": bad})
+
+    def test_gemini_text_only_answer_is_shown(self):
+        data = {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"text": "I can't draw that, but here is a description instead."}]}}]}
+        with self.assertRaises(ig.ImageGenError) as cm:
+            ig.parse_images("gemini", data)
+        self.assertIn("I can't draw that", str(cm.exception))
 
 
 if __name__ == "__main__":
