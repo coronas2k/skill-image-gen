@@ -13,6 +13,8 @@ An agent plugin that gives your AI coding assistant the ability to generate imag
 
 - **Three providers:** OpenAI (`gpt-image-2`, `gpt-image-2.5`/`2.6`), Google Gemini (Nano Banana 2.1, Nano Banana Pro), and OpenRouter (multi-model, default `bytedance-seed/seedream-5-0-flash`)
 - **Zero config up front** — the skill onboards you the first time you use it
+- **Better prompts** — short requests are expanded into full descriptions, with rules for rendering text inside images
+- **Prompt records** — each image is saved with a `.json` file holding the exact prompt, model, settings and cost
 - **Cross-tool compatible** — works in VS Code, Copilot CLI, and Claude Code
 - **Agent plugin format** — discoverable, installable, and manageable from the Extensions view
 
